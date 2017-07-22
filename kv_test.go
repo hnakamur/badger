@@ -116,95 +116,172 @@ func TestConcurrentWrite(t *testing.T) {
 }
 
 func TestCAS(t *testing.T) {
-	dir, err := ioutil.TempDir("", "badger")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
-	kv, _ := NewKV(getTestOptions(dir))
-	defer kv.Close()
+	t.Run("same counter updates the value", func(t *testing.T) {
+		dir, err := ioutil.TempDir("", "badger")
+		require.NoError(t, err)
+		defer os.RemoveAll(dir)
+		kv, _ := NewKV(getTestOptions(dir))
+		defer kv.Close()
 
-	var entries []*Entry
-	for i := 0; i < 100; i++ {
-		entries = append(entries, &Entry{
-			Key:   []byte(fmt.Sprintf("key%d", i)),
-			Value: []byte(fmt.Sprintf("val%d", i)),
-		})
-	}
-	kv.BatchSet(entries)
-	for _, e := range entries {
-		require.NoError(t, e.Error, "entry with error: %+v", e)
-	}
+		key := []byte("key0")
+		val0 := []byte("val0")
+		var item KVItem
+		for {
+			kv.Set(key, val0)
+			if err := kv.Get(key, &item); err != nil {
+				t.Fatal(err)
+			}
 
-	time.Sleep(time.Second)
+			if item.Counter() != 0 {
+				break
+			}
+		}
 
-	var item KVItem
-	for i := 0; i < 100; i++ {
-		k := []byte(fmt.Sprintf("key%d", i))
-		v := []byte(fmt.Sprintf("val%d", i))
-		if err := kv.Get(k, &item); err != nil {
-			t.Error(err)
-		}
-		require.EqualValues(t, v, item.Value())
-		require.EqualValues(t, entries[i].casCounter, item.Counter())
-	}
+		val1 := []byte("val1")
+		err = kv.CompareAndSet(key, val1, item.Counter())
+		require.NoError(t, err)
+	})
+	t.Run("different counter does not override the value", func(t *testing.T) {
+		dir, err := ioutil.TempDir("", "badger")
+		require.NoError(t, err)
+		defer os.RemoveAll(dir)
+		kv, _ := NewKV(getTestOptions(dir))
+		defer kv.Close()
 
-	for i := 0; i < 100; i++ {
-		k := []byte(fmt.Sprintf("key%d", i))
-		v := []byte(fmt.Sprintf("zzz%d", i))
-		cc := entries[i].casCounter
-		if cc == 5 {
-			cc = 6
-		} else {
-			cc = 5
-		}
-		require.Error(t, kv.CompareAndSet(k, v, cc))
-	}
-	time.Sleep(time.Second)
-	for i := 0; i < 100; i++ {
-		k := []byte(fmt.Sprintf("key%d", i))
-		v := []byte(fmt.Sprintf("val%d", i))
-		if err := kv.Get(k, &item); err != nil {
-			t.Error(err)
-		}
-		require.EqualValues(t, v, item.Value())
-		require.EqualValues(t, entries[i].casCounter, item.Counter())
-	}
+		key := []byte("key0")
+		val0 := []byte("val0")
+		var item KVItem
+		for {
+			kv.Set(key, val0)
+			if err := kv.Get(key, &item); err != nil {
+				t.Fatal(err)
+			}
 
-	for i := 0; i < 100; i++ {
-		k := []byte(fmt.Sprintf("key%d", i))
-		cc := entries[i].casCounter
-		if cc == 5 {
-			cc = 6
-		} else {
-			cc = 5
+			if item.Counter() != 0 {
+				break
+			}
 		}
-		require.Error(t, kv.CompareAndDelete(k, cc))
-	}
-	time.Sleep(time.Second)
-	for i := 0; i < 100; i++ {
-		k := []byte(fmt.Sprintf("key%d", i))
-		v := []byte(fmt.Sprintf("val%d", i))
-		if err := kv.Get(k, &item); err != nil {
-			t.Error(err)
-		}
-		require.EqualValues(t, v, item.Value())
-		require.EqualValues(t, entries[i].casCounter, item.Counter())
-	}
 
-	for i := 0; i < 100; i++ {
-		k := []byte(fmt.Sprintf("key%d", i))
-		v := []byte(fmt.Sprintf("zzz%d", i))
-		require.NoError(t, kv.CompareAndSet(k, v, entries[i].casCounter))
-	}
-	time.Sleep(time.Second)
-	for i := 0; i < 100; i++ {
-		k := []byte(fmt.Sprintf("key%d", i))
-		v := []byte(fmt.Sprintf("zzz%d", i)) // Value should be changed.
-		if err := kv.Get(k, &item); err != nil {
-			t.Error(err)
+		val1 := []byte("val1")
+		err = kv.CompareAndSet(key, val1, item.Counter()+1)
+		require.EqualError(t, err, CasMismatch.Error())
+	})
+	t.Run("zero counter does override the value", func(t *testing.T) {
+		dir, err := ioutil.TempDir("", "badger")
+		require.NoError(t, err)
+		defer os.RemoveAll(dir)
+		kv, _ := NewKV(getTestOptions(dir))
+		defer kv.Close()
+
+		key := []byte("key0")
+		val0 := []byte("val0")
+		var item KVItem
+		for {
+			kv.Set(key, val0)
+			if err := kv.Get(key, &item); err != nil {
+				t.Fatal(err)
+			}
+
+			if item.Counter() != 0 {
+				break
+			}
 		}
-		require.EqualValues(t, v, item.Value())
-		require.True(t, item.Counter() != 0)
-	}
+
+		val1 := []byte("val1")
+		err = kv.CompareAndSet(key, val1, 0)
+		require.NoError(t, err)
+	})
+	t.Run("cas with BatchSet", func(t *testing.T) {
+		dir, err := ioutil.TempDir("", "badger")
+		require.NoError(t, err)
+		defer os.RemoveAll(dir)
+		kv, _ := NewKV(getTestOptions(dir))
+		defer kv.Close()
+
+		var entries []*Entry
+		for i := 0; i < 100; i++ {
+			entries = append(entries, &Entry{
+				Key:   []byte(fmt.Sprintf("key%d", i)),
+				Value: []byte(fmt.Sprintf("val%d", i)),
+			})
+		}
+		kv.BatchSet(entries)
+		for _, e := range entries {
+			require.NoError(t, e.Error, "entry with error: %+v", e)
+		}
+
+		time.Sleep(time.Second)
+
+		var item KVItem
+		for i := 0; i < 100; i++ {
+			k := []byte(fmt.Sprintf("key%d", i))
+			v := []byte(fmt.Sprintf("val%d", i))
+			if err := kv.Get(k, &item); err != nil {
+				t.Error(err)
+			}
+			require.EqualValues(t, v, item.Value())
+			require.EqualValues(t, entries[i].casCounter, item.Counter())
+		}
+
+		for i := 0; i < 100; i++ {
+			k := []byte(fmt.Sprintf("key%d", i))
+			v := []byte(fmt.Sprintf("zzz%d", i))
+			cc := entries[i].casCounter
+			if cc == 5 {
+				cc = 6
+			} else {
+				cc = 5
+			}
+			require.Error(t, kv.CompareAndSet(k, v, cc))
+		}
+		time.Sleep(time.Second)
+		for i := 0; i < 100; i++ {
+			k := []byte(fmt.Sprintf("key%d", i))
+			v := []byte(fmt.Sprintf("val%d", i))
+			if err := kv.Get(k, &item); err != nil {
+				t.Error(err)
+			}
+			require.EqualValues(t, v, item.Value())
+			require.EqualValues(t, entries[i].casCounter, item.Counter())
+		}
+
+		for i := 0; i < 100; i++ {
+			k := []byte(fmt.Sprintf("key%d", i))
+			cc := entries[i].casCounter
+			if cc == 5 {
+				cc = 6
+			} else {
+				cc = 5
+			}
+			require.Error(t, kv.CompareAndDelete(k, cc))
+		}
+		time.Sleep(time.Second)
+		for i := 0; i < 100; i++ {
+			k := []byte(fmt.Sprintf("key%d", i))
+			v := []byte(fmt.Sprintf("val%d", i))
+			if err := kv.Get(k, &item); err != nil {
+				t.Error(err)
+			}
+			require.EqualValues(t, v, item.Value())
+			require.EqualValues(t, entries[i].casCounter, item.Counter())
+		}
+
+		for i := 0; i < 100; i++ {
+			k := []byte(fmt.Sprintf("key%d", i))
+			v := []byte(fmt.Sprintf("zzz%d", i))
+			require.NoError(t, kv.CompareAndSet(k, v, entries[i].casCounter))
+		}
+		time.Sleep(time.Second)
+		for i := 0; i < 100; i++ {
+			k := []byte(fmt.Sprintf("key%d", i))
+			v := []byte(fmt.Sprintf("zzz%d", i)) // Value should be changed.
+			if err := kv.Get(k, &item); err != nil {
+				t.Error(err)
+			}
+			require.EqualValues(t, v, item.Value())
+			require.True(t, item.Counter() != 0)
+		}
+	})
 }
 
 func TestGet(t *testing.T) {
